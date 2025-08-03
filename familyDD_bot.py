@@ -24,36 +24,21 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set.")
 
-ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID"))
-GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID")  # Optional: Set for group notifications
-if ADMIN_ID == ADMIN_ID:
+ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "123456789"))
+if ADMIN_ID == 123456789:
     logging.warning("TELEGRAM_ADMIN_ID is placeholder. Admin features may not work.")
 
+GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID")  # Optional for group notifications
 DATA_FILE = "points_data.json"
 BACKUP_DIR = "backups"
-HISTORY_PURGE_INTERVAL_DAYS = 60  # Changed to 2 months
+HISTORY_PURGE_INTERVAL_DAYS = 60  # 2 months
 WEEKLY_SUMMARY_DAY = 6  # Sunday (0=Monday, 6=Sunday)
 
 # --- Conversation States ---
-(
-    MAIN_MENU,
-    SELECT_MEMBER_ADD,
-    ENTER_AMOUNT_ADD,
-    ENTER_REASON_ADD,
-    CONFIRM_ADD,
-    SELECT_MEMBER_SUBTRACT,
-    ENTER_AMOUNT_SUBTRACT,
-    ENTER_REASON_SUBTRACT,
-    CONFIRM_SUBTRACT,
-    SELECT_FROM_TRANSFER,
-    SELECT_TO_TRANSFER,
-    ENTER_AMOUNT_TRANSFER,
-    ENTER_REASON_TRANSFER,
-    CONFIRM_TRANSFER,
-    ADD_MEMBER_NAME,
-    ADD_MEMBER_ID,
-    CONFIRM_ADD_MEMBER,
-) = range(16)
+MAIN_MENU, SELECT_MEMBER_ADD, ENTER_AMOUNT_ADD, ENTER_REASON_ADD, CONFIRM_ADD, \
+SELECT_MEMBER_SUBTRACT, ENTER_AMOUNT_SUBTRACT, ENTER_REASON_SUBTRACT, CONFIRM_SUBTRACT, \
+SELECT_FROM_TRANSFER, SELECT_TO_TRANSFER, ENTER_AMOUNT_TRANSFER, ENTER_REASON_TRANSFER, CONFIRM_TRANSFER, \
+ADD_MEMBER_NAME, ADD_MEMBER_ID, CONFIRM_ADD_MEMBER = range(17)
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -126,7 +111,6 @@ class DataManager:
             }
             with open(self.data_file, "w") as f:
                 json.dump(data, f, indent=4)
-            # Create backup
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             backup_file = os.path.join(self.backup_dir, f"points_data_{timestamp}.json")
             shutil.copy(self.data_file, backup_file)
@@ -201,7 +185,7 @@ class DataManager:
             f"{'to ' + entry.get('target', '') if 'target' in entry else ''}"
             f"{'from ' + entry.get('source', '') + ' to ' + entry.get('target', '') if 'source' in entry else ''}"
             f" (Reason: _{entry['reason']}_)"
-            for entry in reversed(weekly_history[-10:])  # Last 10 entries
+            for entry in reversed(weekly_history[-10:])
         )
         return (
             f"📊 **Weekly Family Points Summary** 📊\n\n"
