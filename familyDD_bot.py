@@ -446,8 +446,8 @@ class FamilyPointsBot:
                 # Validate required data
                 if target_id is None or amount is None or reason is None or target_name is None:
                     logger.error(f"Missing context data: target_id={target_id}, amount={amount}, reason={reason}, target_name={target_name}")
-                    await query.edit_message_text(
-                        "❌ Session data lost. Please start over.",
+                    await update.effective_chat.send_message(
+                        "❌ Session data lost. Please start over with /start",
                         reply_markup=BotUI.get_main_menu_keyboard(),
                     )
                     context.user_data.clear()
@@ -480,13 +480,14 @@ class FamilyPointsBot:
                 self.data_manager.save_data()
                 logger.info("Data saved successfully")
                 
-                # Send confirmation message
+                # Send confirmation message - use send instead of edit to avoid inline keyboard errors
                 success_msg = (
-                    f"✅ Added {amount} points to {target_name} (Reason: {reason}).\n"
+                    f"✅ Added {amount} points to {target_name}!\n"
+                    f"Reason: {reason}\n"
                     f"New total: {new_total} points."
                 )
                 
-                await query.edit_message_text(
+                await update.effective_chat.send_message(
                     success_msg,
                     reply_markup=BotUI.get_main_menu_keyboard(),
                 )
@@ -494,32 +495,26 @@ class FamilyPointsBot:
                 
             elif query.data == "cancel_operation":
                 logger.info("Add operation cancelled by user")
-                await query.edit_message_text(
-                    f"🚫 Operation cancelled for adding {context.user_data.get('amount', '?')} points to {context.user_data.get('target_name', '?')}."
-                    "\nReturning to main menu.",
+                await update.effective_chat.send_message(
+                    f"🚫 Operation cancelled.\nReturning to main menu.",
                     reply_markup=BotUI.get_main_menu_keyboard(),
                 )
             else:
                 logger.warning(f"Unexpected callback data: {query.data}")
-                await query.edit_message_text("❌ Action cancelled.", reply_markup=BotUI.get_main_menu_keyboard())
+                await update.effective_chat.send_message(
+                    "❌ Action cancelled.", 
+                    reply_markup=BotUI.get_main_menu_keyboard()
+                )
                 
         except Exception as e:
             logger.error(f"Error in confirm_add: {e}", exc_info=True)
             try:
-                await query.edit_message_text(
-                    f"❌ Error occurred: {str(e)}\nPlease try again.",
+                await update.effective_chat.send_message(
+                    f"❌ Error occurred: {str(e)}\nPlease try again with /start",
                     reply_markup=BotUI.get_main_menu_keyboard(),
                 )
-            except Exception as edit_error:
-                logger.error(f"Failed to send error message: {edit_error}")
-                # Try sending a new message as fallback
-                try:
-                    await update.effective_chat.send_message(
-                        f"❌ Error occurred: {str(e)}\nPlease try again with /start",
-                        reply_markup=BotUI.get_main_menu_keyboard(),
-                    )
-                except Exception as fallback_error:
-                    logger.error(f"All message sending attempts failed: {fallback_error}")
+            except Exception as fallback_error:
+                logger.error(f"Failed to send error message: {fallback_error}")
                     
         finally:
             context.user_data.clear()
@@ -967,18 +962,44 @@ class FamilyPointsBot:
         """Sends or edits a message with retry logic."""
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                if update.callback_query:
-                    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+                if update.callback_query and update.callback_query.message:
+                    # Try to edit the existing message
+                    await update.callback_query.edit_message_text(
+                        text, 
+                        reply_markup=reply_markup, 
+                        parse_mode=parse_mode
+                    )
                     return
                 else:
-                    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+                    # Send a new message
+                    await update.effective_chat.send_message(
+                        text, 
+                        reply_markup=reply_markup, 
+                        parse_mode=parse_mode
+                    )
                     return
             except BadRequest as e:
-                if "message is not modified" in str(e).lower():
+                error_msg = str(e).lower()
+                if "message is not modified" in error_msg:
                     logger.debug("Message content unchanged, skipping edit")
                     return
-                logger.warning(f"Failed to edit/send message (attempt {attempt + 1}): {e}")
-                await asyncio.sleep(NETWORK_RETRY_DELAY)
+                elif "message can't be edited" in error_msg or "inline keyboard expected" in error_msg:
+                    logger.warning(f"Can't edit message, sending new one: {e}")
+                    # Fall back to sending a new message
+                    try:
+                        await update.effective_chat.send_message(
+                            text, 
+                            reply_markup=reply_markup, 
+                            parse_mode=parse_mode
+                        )
+                        return
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback message failed: {fallback_error}")
+                        if attempt == RETRY_ATTEMPTS - 1:
+                            raise
+                else:
+                    logger.warning(f"BadRequest error (attempt {attempt + 1}): {e}")
+                    await asyncio.sleep(NETWORK_RETRY_DELAY)
             except NetworkError as e:
                 logger.warning(f"Network error (attempt {attempt + 1}): {e}")
                 await asyncio.sleep(EXTENDED_RETRY_DELAY)
@@ -986,12 +1007,21 @@ class FamilyPointsBot:
                 logger.error(f"Unexpected error in _send_or_edit_message (attempt {attempt + 1}): {e}")
                 await asyncio.sleep(NETWORK_RETRY_DELAY)
                 
-        # Final fallback - send new message
-        logger.error("Failed to send/edit message after retries. Sending new message.")
+        # Final fallback - send new message without retry
+        logger.error("Failed to send/edit message after retries. Final fallback attempt.")
         try:
-            await update.effective_chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            await update.effective_chat.send_message(
+                text, 
+                reply_markup=reply_markup, 
+                parse_mode=parse_mode
+            )
         except Exception as e:
-            logger.error(f"Failed to send fallback message: {e}")
+            logger.error(f"Final fallback message failed: {e}")
+            # Send a simple message without markup as last resort
+            try:
+                await update.effective_chat.send_message("❌ An error occurred. Please use /start to restart.")
+            except Exception as final_error:
+                logger.error(f"Even basic message failed: {final_error}")
 
     def setup_handlers(self) -> None:
         """Sets up all bot handlers."""
