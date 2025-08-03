@@ -426,7 +426,6 @@ class FamilyPointsBot:
     async def confirm_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Confirms adding points or cancels the operation."""
         query = update.callback_query
-        await query.answer()
         
         if not query:
             await update.message.reply_text("❌ Invalid action. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
@@ -434,40 +433,97 @@ class FamilyPointsBot:
             return MAIN_MENU
 
         try:
+            await query.answer()
+            logger.info(f"Confirm add callback received: {query.data}")
+            
             if query.data == "confirm":
-                target_id = context.user_data["target_id"]
-                amount = context.user_data["amount"]
-                reason = context.user_data["reason"]
+                # Get data from context
+                target_id = context.user_data.get("target_id")
+                amount = context.user_data.get("amount")
+                reason = context.user_data.get("reason")
+                target_name = context.user_data.get("target_name")
                 
+                # Validate required data
+                if target_id is None or amount is None or reason is None or target_name is None:
+                    logger.error(f"Missing context data: target_id={target_id}, amount={amount}, reason={reason}, target_name={target_name}")
+                    await query.edit_message_text(
+                        "❌ Session data lost. Please start over.",
+                        reply_markup=BotUI.get_main_menu_keyboard(),
+                    )
+                    context.user_data.clear()
+                    return MAIN_MENU
+                
+                logger.info(f"Adding {amount} points to {target_name} (ID: {target_id}) by user {update.effective_user.id}")
+                
+                # Update points
                 if target_id == -1:  # Car
+                    old_total = self.data_manager.family_goal.points
                     self.data_manager.family_goal.points += amount
+                    new_total = self.data_manager.family_goal.points
+                    logger.info(f"Car points updated: {old_total} -> {new_total}")
                 else:
-                    self.data_manager.points[str(target_id)] = self.data_manager.points.get(str(target_id), 0) + amount
+                    old_total = self.data_manager.points.get(str(target_id), 0)
+                    self.data_manager.points[str(target_id)] = old_total + amount
+                    new_total = self.data_manager.points[str(target_id)]
+                    logger.info(f"{target_name} points updated: {old_total} -> {new_total}")
                 
-                self.data_manager.record_activity(update.effective_user.id, "add", amount, target_id=target_id, reason=reason)
+                # Record activity
+                self.data_manager.record_activity(
+                    update.effective_user.id, 
+                    "add", 
+                    amount, 
+                    target_id=target_id, 
+                    reason=reason
+                )
                 
-                new_total = self.data_manager.family_goal.points if target_id == -1 else self.data_manager.points[str(target_id)]
+                # Force save data
+                self.data_manager.save_data()
+                logger.info("Data saved successfully")
+                
+                # Send confirmation message
+                success_msg = (
+                    f"✅ Added {amount} points to {target_name} (Reason: {reason}).\n"
+                    f"New total: {new_total} points."
+                )
+                
                 await query.edit_message_text(
-                    f"✅ Added {amount} points to {context.user_data['target_name']} (Reason: {reason}).\n"
-                    f"New total: {new_total} points.",
+                    success_msg,
                     reply_markup=BotUI.get_main_menu_keyboard(),
                 )
+                logger.info("Confirmation message sent")
+                
             elif query.data == "cancel_operation":
+                logger.info("Add operation cancelled by user")
                 await query.edit_message_text(
-                    f"🚫 Operation cancelled for adding {context.user_data['amount']} points to {context.user_data['target_name']}."
+                    f"🚫 Operation cancelled for adding {context.user_data.get('amount', '?')} points to {context.user_data.get('target_name', '?')}."
                     "\nReturning to main menu.",
                     reply_markup=BotUI.get_main_menu_keyboard(),
                 )
             else:
+                logger.warning(f"Unexpected callback data: {query.data}")
                 await query.edit_message_text("❌ Action cancelled.", reply_markup=BotUI.get_main_menu_keyboard())
+                
         except Exception as e:
-            logger.error(f"Error in confirm_add: {e}")
-            await query.edit_message_text(
-                f"❌ Error occurred. Please try again. (Error: {str(e)})",
-                reply_markup=BotUI.get_main_menu_keyboard(),
-            )
+            logger.error(f"Error in confirm_add: {e}", exc_info=True)
+            try:
+                await query.edit_message_text(
+                    f"❌ Error occurred: {str(e)}\nPlease try again.",
+                    reply_markup=BotUI.get_main_menu_keyboard(),
+                )
+            except Exception as edit_error:
+                logger.error(f"Failed to send error message: {edit_error}")
+                # Try sending a new message as fallback
+                try:
+                    await update.effective_chat.send_message(
+                        f"❌ Error occurred: {str(e)}\nPlease try again with /start",
+                        reply_markup=BotUI.get_main_menu_keyboard(),
+                    )
+                except Exception as fallback_error:
+                    logger.error(f"All message sending attempts failed: {fallback_error}")
+                    
         finally:
             context.user_data.clear()
+            
         return MAIN_MENU
 
     async def select_member_subtract(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
