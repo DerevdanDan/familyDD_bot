@@ -158,7 +158,7 @@ class FamilyPointsBot:
             context.user_data['action'] = 'add'
             await update.message.reply_text(
                 "Select member to add points to:",
-                reply_markup=self.get_member_keyboard(include_car=False)  # No car for add
+                reply_markup=self.get_member_keyboard(include_car=False)
             )
             return SELECT_MEMBER
             
@@ -166,7 +166,7 @@ class FamilyPointsBot:
             context.user_data['action'] = 'subtract'
             await update.message.reply_text(
                 "Select member to subtract points from:",
-                reply_markup=self.get_member_keyboard(include_car=False)  # No car for subtract
+                reply_markup=self.get_member_keyboard(include_car=False)
             )
             return SELECT_MEMBER
             
@@ -174,7 +174,7 @@ class FamilyPointsBot:
             context.user_data['action'] = 'transfer'
             await update.message.reply_text(
                 "Select member to transfer points FROM:",
-                reply_markup=self.get_member_keyboard(include_car=False)  # No car as source
+                reply_markup=self.get_member_keyboard(include_car=False)
             )
             return SELECT_MEMBER
             
@@ -196,11 +196,20 @@ class FamilyPointsBot:
     async def select_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle member selection"""
         query = update.callback_query
+        # Ensure query is not None before proceeding
+        if query is None:
+            return ConversationHandler.END
+            
         await query.answer()
         
         if query.data == "cancel":
-            await query.edit_message_text("❌ Cancelled.")
-            return await self.start(update, context)
+            # Send a new message instead of editing a non-inline one
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Cancelled.",
+                reply_markup=self.get_main_menu_keyboard()
+            )
+            return MAIN_MENU
             
         action = context.user_data.get('action')
         
@@ -245,7 +254,6 @@ class FamilyPointsBot:
                 
                 await query.edit_message_text(
                     f"Enter amount of points to transfer from {context.user_data['from_name']} to {target_name}:",
-                    reply_markup=ReplyKeyboardRemove()
                 )
                 return ENTER_AMOUNT
             
@@ -259,7 +267,6 @@ class FamilyPointsBot:
             
             await query.edit_message_text(
                 f"Enter amount of points to {action} for {member_name}:",
-                reply_markup=ReplyKeyboardRemove()
             )
             return ENTER_AMOUNT
             
@@ -335,7 +342,12 @@ class FamilyPointsBot:
         
         if query.data == "cancel":
             await query.edit_message_text("❌ Cancelled.")
-            return await self.start(update, context)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Use /start to begin again.",
+                reply_markup=self.get_main_menu_keyboard()
+            )
+            return MAIN_MENU
             
         action = context.user_data.get('action')
         amount = context.user_data.get('amount')
@@ -350,8 +362,7 @@ class FamilyPointsBot:
                 self.record_action(update.effective_user.id, "add", amount, target_name, reason)
                 
                 await query.edit_message_text(
-                    f"✅ Added {amount} points to {target_name}!\nReason: {reason}",
-                    reply_markup=self.get_main_menu_keyboard()
+                    f"✅ Added {amount} points to {target_name}!\nReason: {reason}"
                 )
                 
             elif action == 'subtract':
@@ -360,7 +371,6 @@ class FamilyPointsBot:
                 if current_points < amount:
                     await query.edit_message_text(
                         f"❌ {context.user_data['target_name']} only has {current_points} points.",
-                        reply_markup=self.get_main_menu_keyboard()
                     )
                     context.user_data.clear()
                     return MAIN_MENU
@@ -371,8 +381,7 @@ class FamilyPointsBot:
                 self.record_action(update.effective_user.id, "subtract", amount, target_name, reason)
                 
                 await query.edit_message_text(
-                    f"✅ Subtracted {amount} points from {target_name}!\nReason: {reason}",
-                    reply_markup=self.get_main_menu_keyboard()
+                    f"✅ Subtracted {amount} points from {target_name}!\nReason: {reason}"
                 )
                 
             elif action == 'transfer':
@@ -383,7 +392,6 @@ class FamilyPointsBot:
                 if from_member == target:
                     await query.edit_message_text(
                         "❌ Cannot transfer to yourself.",
-                        reply_markup=self.get_main_menu_keyboard()
                     )
                     context.user_data.clear()
                     return MAIN_MENU
@@ -393,7 +401,6 @@ class FamilyPointsBot:
                 if current_points < amount:
                     await query.edit_message_text(
                         f"❌ {context.user_data['from_name']} only has {current_points} points.",
-                        reply_markup=self.get_main_menu_keyboard()
                     )
                     context.user_data.clear()
                     return MAIN_MENU
@@ -412,17 +419,21 @@ class FamilyPointsBot:
                 self.record_action(update.effective_user.id, "transfer", amount, f"{from_name} → {target_name}", reason)
                 
                 await query.edit_message_text(
-                    f"✅ Transferred {amount} points from {from_name} to {target_name}!\nReason: {reason}",
-                    reply_markup=self.get_main_menu_keyboard()
+                    f"✅ Transferred {amount} points from {from_name} to {target_name}!\nReason: {reason}"
                 )
                 
         except Exception as e:
             logger.error(f"Error in confirm_action: {e}")
             await query.edit_message_text(
-                f"❌ Error occurred: {str(e)}",
-                reply_markup=self.get_main_menu_keyboard()
+                f"❌ Error occurred: {str(e)}"
             )
-            
+        
+        # After confirmation, send a new message with the main menu keyboard
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Choose another action:",
+            reply_markup=self.get_main_menu_keyboard()
+        )
         context.user_data.clear()
         return MAIN_MENU
         
@@ -498,10 +509,12 @@ class FamilyPointsBot:
             entry_points=[CommandHandler("start", self.start)],
             states={
                 MAIN_MENU: [
-                    MessageHandler(filters.Regex("^(➕ Add Points|➖ Subtract Points|↔️ Transfer Points|📊 Leaderboard|📜 History)$"), self.handle_main_menu)
+                    MessageHandler(filters.Regex("^(➕ Add Points|➖ Subtract Points|↔️ Transfer Points|📊 Leaderboard|📜 History)$"), self.handle_main_menu),
+                    # Added a fallback to handle unexpected messages in the main menu state
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_main_menu)
                 ],
                 SELECT_MEMBER: [
-                    CallbackQueryHandler(self.select_member, pattern="^member_")
+                    CallbackQueryHandler(self.select_member, pattern="^member_|^cancel$")
                 ],
                 ENTER_AMOUNT: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_amount)
