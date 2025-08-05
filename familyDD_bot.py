@@ -1,12 +1,8 @@
 import logging
 import json
 import os
-import shutil
-import threading
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Any
-from uuid import uuid4
-import asyncio
+from datetime import datetime
+from typing import Dict, List, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -18,1087 +14,498 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler,
 )
-from telegram.error import BadRequest, NetworkError
 
-# --- Configuration ---
+# Configuration
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set.")
 
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "123456789"))
-if ADMIN_ID == 123456789:
-    logging.warning("TELEGRAM_ADMIN_ID is placeholder. Admin features may not work.")
 
-GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID")  # Optional for group notifications
-DATA_FILE = "points_data.json"
-BACKUP_DIR = "backups"
-HISTORY_PURGE_INTERVAL_DAYS = 60  # 2 months
-WEEKLY_SUMMARY_DAY = 6  # Sunday (0=Monday, 6=Sunday)
+# Conversation states
+MAIN_MENU, SELECT_MEMBER, ENTER_AMOUNT, ENTER_REASON, CONFIRM_ACTION = range(5)
 
-# Constants
-RETRY_ATTEMPTS = 3
-NETWORK_RETRY_DELAY = 1
-EXTENDED_RETRY_DELAY = 2
-
-# --- Conversation States ---
-MAIN_MENU, SELECT_MEMBER_ADD, ENTER_AMOUNT_ADD, ENTER_REASON_ADD, CONFIRM_ADD, \
-SELECT_MEMBER_SUBTRACT, ENTER_AMOUNT_SUBTRACT, ENTER_REASON_SUBTRACT, CONFIRM_SUBTRACT, \
-SELECT_FROM_TRANSFER, SELECT_TO_TRANSFER, ENTER_AMOUNT_TRANSFER, ENTER_REASON_TRANSFER, CONFIRM_TRANSFER, \
-ADD_MEMBER_NAME, ADD_MEMBER_ID, CONFIRM_ADD_MEMBER = range(17)
-
-# --- Logging Setup ---
+# Logging setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# --- Data Classes ---
-class FamilyGoal:
-    def __init__(self, name: str, points: int = 0):
-        self.name = name
-        self.points = points
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"name": self.name, "points": self.points}
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "FamilyGoal":
-        return cls(data["name"], data.get("points", 0))
-
-class DataManager:
-    def __init__(self, data_file: str, backup_dir: str):
-        self.data_file = data_file
-        self.backup_dir = backup_dir
-        self.family_members: Dict[int, str] = {}
-        self.points: Dict[str, int] = {}
-        self.history: List[Dict[str, Any]] = []
-        self.family_goal = FamilyGoal("Car")
-        self._lock = threading.Lock()  # Thread safety for data operations
-        self.load_data()
-
-    def load_data(self) -> None:
-        """Loads data from JSON file or initializes defaults."""
-        os.makedirs(self.backup_dir, exist_ok=True)
-        initial_members = {
+class FamilyPointsBot:
+    def __init__(self):
+        self.data_file = "points_data.json"
+        self.family_members = {
             15260416: "Papa",
-            441113371: "Mama",
+            441113371: "Mama", 
             1059153162: "Danya",
             5678069063: "Vlad",
             5863747570: "Tima",
         }
+        self.points = {}
+        self.history = []
+        self.car_points = 0
+        self.load_data()
         
-        with self._lock:
-            try:
-                if os.path.exists(self.data_file):
-                    with open(self.data_file, "r", encoding='utf-8') as f:
-                        data = json.load(f)
-                        self.points = data.get("points", {})
-                        self.history = data.get("history", [])
-                        self.family_members = {int(k): v for k, v in data.get("family_members", initial_members).items()}
-                        self.family_goal = FamilyGoal.from_dict(data.get("family_goal", {"name": "Car"}))
-                else:
-                    self.family_members = initial_members
-                    self.points = {str(uid): 0 for uid in initial_members}
-                    self.history = []
-                    self.save_data_unsafe()
-                    
-                # Ensure all family members have point entries
-                for uid in self.family_members:
-                    if str(uid) not in self.points:
-                        self.points[str(uid)] = 0
-                        
-                logger.info(f"Data loaded successfully. {len(self.family_members)} members, {len(self.history)} history entries.")
-            except Exception as e:
-                logger.error(f"Error loading {self.data_file}: {e}. Using defaults.")
-                self.family_members = initial_members
-                self.points = {str(uid): 0 for uid in initial_members}
+    def load_data(self):
+        """Load data from JSON file or initialize defaults"""
+        try:
+            if os.path.exists(self.data_file):
+                with open(self.data_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.points = data.get('points', {})
+                    self.history = data.get('history', [])
+                    self.car_points = data.get('car_points', 0)
+            else:
+                # Initialize with zero points for all members
+                self.points = {str(uid): 0 for uid in self.family_members}
                 self.history = []
-                self.save_data_unsafe()
-
-    def save_data_unsafe(self) -> None:
-        """Saves data without acquiring lock (internal use only)."""
+                self.car_points = 0
+                self.save_data()
+        except Exception as e:
+            logger.error(f"Error loading data: {e}")
+            self.points = {str(uid): 0 for uid in self.family_members}
+            self.history = []
+            self.car_points = 0
+            
+    def save_data(self):
+        """Save data to JSON file"""
         try:
             data = {
-                "points": self.points,
-                "history": self.history,
-                "family_members": {str(k): v for k, v in self.family_members.items()},
-                "family_goal": self.family_goal.to_dict(),
+                'points': self.points,
+                'history': self.history,
+                'car_points': self.car_points
             }
-            with open(self.data_file, "w", encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            
-            # Create backup
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            backup_file = os.path.join(self.backup_dir, f"points_data_{timestamp}.json")
-            shutil.copy(self.data_file, backup_file)
-            logger.info(f"Data saved. Backup created: {backup_file}")
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"Failed to save data: {e}")
-            raise
-
-    def save_data(self) -> None:
-        """Thread-safe data saving."""
-        with self._lock:
-            self.save_data_unsafe()
-
-    def add_member(self, user_id: int, name: str) -> Tuple[bool, str]:
-        """Adds a new family member."""
-        with self._lock:
-            if user_id in self.family_members:
-                return False, f"User {name} (ID: {user_id}) already exists."
+            logger.error(f"Error saving data: {e}")
             
-            self.family_members[user_id] = name
-            self.points[str(user_id)] = 0
-            self.save_data_unsafe()
-            return True, "Member added successfully."
-
     def is_family_member(self, user_id: int) -> bool:
-        """Checks if user is a family member."""
+        """Check if user is a family member"""
         return user_id in self.family_members or user_id == ADMIN_ID
-
-    def record_activity(
-        self,
-        performer_id: int,
-        action: str,
-        amount: int,
-        target_id: Optional[int] = None,
-        source_id: Optional[int] = None,
-        reason: str = "",
-    ) -> None:
-        """Records an activity in history."""
+        
+    def record_action(self, user_id: int, action: str, amount: int, target: str, reason: str):
+        """Record an action in history"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        performer = self.family_members.get(user_id, f"User {user_id}")
+        
         entry = {
-            "id": str(uuid4()),
-            "timestamp": timestamp,
-            "performer_id": performer_id,
-            "performer": self.family_members.get(performer_id, f"User {performer_id}"),
-            "action": action,
-            "amount": amount,
-            "reason": reason,
+            'timestamp': timestamp,
+            'performer': performer,
+            'action': action,
+            'amount': amount,
+            'target': target,
+            'reason': reason
         }
+        self.history.append(entry)
+        self.save_data()
         
-        if target_id is not None:
-            entry["target_id"] = target_id
-            entry["target"] = self.family_members.get(target_id, "Car" if target_id == -1 else f"User {target_id}")
-        if source_id is not None:
-            entry["source_id"] = source_id
-            entry["source"] = self.family_members.get(source_id, f"User {source_id}")
-            
-        with self._lock:
-            self.history.append(entry)
-            self.save_data_unsafe()
-
-    def purge_old_history(self) -> None:
-        """Purges history entries older than HISTORY_PURGE_INTERVAL_DAYS."""
-        cutoff = datetime.now() - timedelta(days=HISTORY_PURGE_INTERVAL_DAYS)
-        with self._lock:
-            initial_len = len(self.history)
-            self.history = [
-                entry for entry in self.history
-                if datetime.strptime(entry["timestamp"], "%Y-%m-%d %H:%M:%S") >= cutoff
-            ]
-            if len(self.history) < initial_len:
-                logger.info(f"Purged {initial_len - len(self.history)} old history entries.")
-                self.save_data_unsafe()
-
-    def get_weekly_summary(self) -> str:
-        """Generates a weekly summary of points and history."""
-        one_week_ago = datetime.now() - timedelta(days=7)
-        with self._lock:
-            weekly_history = [
-                entry for entry in self.history
-                if datetime.strptime(entry["timestamp"], "%Y-%m-%d %H:%M:%S") >= one_week_ago
-            ]
-            
-            points_summary = "\n".join(
-                f"• {self.family_members.get(int(uid), f'User {uid}')}: {points} points"
-                for uid, points in sorted(self.points.items(), key=lambda x: int(x[0]))
-                if int(uid) in self.family_members
-            )
-            
-            history_summary = "\n\n".join(
-                self._format_history_entry(entry)
-                for entry in reversed(weekly_history[-10:])
-            )
-            
-        return (
-            f"📊 **Weekly Family Points Summary** 📊\n\n"
-            f"**Current Points**:\n{points_summary or 'No points yet.'}\n\n"
-            f"**Family Goal (Car)**: {self.family_goal.points} points\n\n"
-            f"**Recent Activity**:\n{history_summary or 'No activity this week.'}"
-        )
-
-    def _format_history_entry(self, entry: Dict[str, Any]) -> str:
-        """Formats a single history entry for display."""
-        timestamp = entry['timestamp']
-        performer = entry['performer']
-        action = entry['action']
-        amount = entry['amount']
-        reason = entry['reason']
-        
-        if action == 'transfer':
-            source = entry.get('source', 'Unknown')
-            target = entry.get('target', 'Unknown')
-            return f"*{timestamp}* - {performer} transferred {amount} points from {source} to {target} (Reason: _{reason}_)"
-        elif action in ['add', 'subtract']:
-            target = entry.get('target', 'Unknown')
-            action_word = 'added' if action == 'add' else 'subtracted'
-            preposition = 'to' if action == 'add' else 'from'
-            return f"*{timestamp}* - {performer} {action_word} {amount} points {preposition} {target} (Reason: _{reason}_)"
-        else:
-            return f"*{timestamp}* - {performer} {action} {amount} points (Reason: _{reason}_)"
-
-# --- Bot UI Helper ---
-class BotUI:
-    @staticmethod
-    def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-        """Returns a custom keyboard for the main menu."""
+    def get_main_menu_keyboard(self):
+        """Get main menu keyboard"""
         keyboard = [
             ["➕ Add Points", "➖ Subtract Points"],
             ["↔️ Transfer Points", "📊 Leaderboard"],
-            ["📜 History"],
+            ["📜 History"]
         ]
-        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-    @staticmethod
-    def get_member_selection_keyboard(members: Dict[int, str], exclude_id: Optional[int] = None, include_car: bool = False) -> InlineKeyboardMarkup:
-        """Returns an inline keyboard for selecting members."""
+        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+    def get_member_keyboard(self, include_car=False):
+        """Get member selection keyboard"""
         keyboard = []
-        for uid, name in sorted(members.items(), key=lambda x: x[1]):
-            if uid != exclude_id:
-                keyboard.append([InlineKeyboardButton(name, callback_data=f"select_member_{uid}")])
+        for uid, name in self.family_members.items():
+            keyboard.append([InlineKeyboardButton(name, callback_data=f"member_{uid}")])
         if include_car:
-            keyboard.append([InlineKeyboardButton("🚗 Car (Family Goal)", callback_data="select_member_-1")])
-        keyboard.append([InlineKeyboardButton("↩️ Back", callback_data="main_menu")])
+            keyboard.append([InlineKeyboardButton("🚗 Car", callback_data="member_car")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+        return InlineKeyboardMarkup(keyboard)
+        
+    def get_confirmation_keyboard(self):
+        """Get confirmation keyboard"""
+        keyboard = [
+            [InlineKeyboardButton("✅ Confirm", callback_data="confirm")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        ]
         return InlineKeyboardMarkup(keyboard)
 
-    @staticmethod
-    def get_confirmation_keyboard() -> InlineKeyboardMarkup:
-        """Returns a confirmation keyboard with Cancel Operation option."""
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Confirm", callback_data="confirm")],
-            [InlineKeyboardButton("🚫 Cancel Operation", callback_data="cancel_operation")],
-        ])
-
-# --- Bot Logic ---
-class FamilyPointsBot:
-    def __init__(self, token: str, data_manager: DataManager):
-        self.token = token
-        self.data_manager = data_manager
-        self.application = Application.builder().token(token).build()
-        self.setup_handlers()
-
-    def _is_authorized(self, user_id: int) -> bool:
-        """Checks if user is authorized to use the bot."""
-        return self.data_manager.is_family_member(user_id)
-
-    async def _check_authorization(self, update: Update) -> bool:
-        """Checks authorization and sends error message if unauthorized."""
-        if not self._is_authorized(update.effective_user.id):
-            await update.effective_chat.send_message(
-                "❌ You are not authorized to use this bot. Contact the administrator."
-            )
-            return False
-        return True
-
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles /start command and main menu."""
-        if not await self._check_authorization(update):
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle /start command"""
+        if not self.is_family_member(update.effective_user.id):
+            await update.message.reply_text("❌ You are not authorized to use this bot.")
             return ConversationHandler.END
             
-        await self._send_or_edit_message(
-            update,
-            "👋 Welcome to the Family Points Bot! Choose an action:",
-            reply_markup=BotUI.get_main_menu_keyboard(),
+        await update.message.reply_text(
+            "👋 Welcome to Family Points Bot!\nChoose an action:",
+            reply_markup=self.get_main_menu_keyboard()
         )
         context.user_data.clear()
         return MAIN_MENU
-
+        
     async def handle_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles main menu selections."""
-        if not await self._check_authorization(update):
+        """Handle main menu selections"""
+        if not self.is_family_member(update.effective_user.id):
             return ConversationHandler.END
             
-        query = update.callback_query
-        text = update.message.text if update.message else query.data
-        if query:
-            await query.answer()
-
-        context.user_data["action_type"] = text
-        try:
-            if text == "➕ Add Points":
-                await self._send_or_edit_message(
-                    update,
-                    "Select a member to add points to:",
-                    reply_markup=BotUI.get_member_selection_keyboard(self.data_manager.family_members),
-                )
-                return SELECT_MEMBER_ADD
-            elif text == "➖ Subtract Points":
-                await self._send_or_edit_message(
-                    update,
-                    "Select a member to subtract points from:",
-                    reply_markup=BotUI.get_member_selection_keyboard(self.data_manager.family_members),
-                )
-                return SELECT_MEMBER_SUBTRACT
-            elif text == "↔️ Transfer Points":
-                await self._send_or_edit_message(
-                    update,
-                    "Select who to transfer points FROM:",
-                    reply_markup=BotUI.get_member_selection_keyboard(self.data_manager.family_members),
-                )
-                return SELECT_FROM_TRANSFER
-            elif text == "📊 Leaderboard":
-                return await self.display_leaderboard(update, context)
-            elif text == "📜 History":
-                return await self.display_history(update, context)
-            else:
-                await self._send_or_edit_message(
-                    update,
-                    "Please select a valid option:",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-                return MAIN_MENU
-        except Exception as e:
-            logger.error(f"Error in handle_main_menu: {e}")
-            await self._send_or_edit_message(
-                update,
-                "❌ An error occurred. Please try again.",
-                reply_markup=BotUI.get_main_menu_keyboard(),
+        text = update.message.text
+        
+        if text == "➕ Add Points":
+            context.user_data['action'] = 'add'
+            await update.message.reply_text(
+                "Select member to add points to:",
+                reply_markup=self.get_member_keyboard(include_car=True)
             )
-            context.user_data.clear()
+            return SELECT_MEMBER
+            
+        elif text == "➖ Subtract Points":
+            context.user_data['action'] = 'subtract'
+            await update.message.reply_text(
+                "Select member to subtract points from:",
+                reply_markup=self.get_member_keyboard()
+            )
+            return SELECT_MEMBER
+            
+        elif text == "↔️ Transfer Points":
+            context.user_data['action'] = 'transfer'
+            await update.message.reply_text(
+                "Select member to transfer points FROM:",
+                reply_markup=self.get_member_keyboard()
+            )
+            return SELECT_MEMBER
+            
+        elif text == "📊 Leaderboard":
+            await self.show_leaderboard(update, context)
             return MAIN_MENU
-
-    async def select_member_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles member selection for adding points."""
+            
+        elif text == "📜 History":
+            await self.show_history(update, context)
+            return MAIN_MENU
+            
+        else:
+            await update.message.reply_text(
+                "Please use the menu buttons:",
+                reply_markup=self.get_main_menu_keyboard()
+            )
+            return MAIN_MENU
+            
+    async def select_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle member selection"""
         query = update.callback_query
         await query.answer()
         
-        if query.data == "main_menu":
-            return await self.start_command(update, context)
+        if query.data == "cancel":
+            await query.edit_message_text("❌ Cancelled.")
+            return await self.start(update, context)
             
-        try:
-            target_id = int(query.data.split("_")[-1])
-            target_name = self.data_manager.family_members.get(target_id, "Car" if target_id == -1 else "Unknown")
-            context.user_data.update({"target_id": target_id, "target_name": target_name})
-            await query.edit_message_text(f"Enter points to add to {target_name}:")
-            return ENTER_AMOUNT_ADD
-        except (ValueError, IndexError) as e:
-            logger.error(f"Error parsing member selection: {e}")
-            await query.edit_message_text("❌ Invalid selection. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            return MAIN_MENU
-
-    async def enter_amount_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles point amount input for adding."""
+        action = context.user_data.get('action')
+        
+        if action == 'transfer':
+            # For transfer, store the source member
+            if query.data == "member_car":
+                await query.edit_message_text("❌ Cannot transfer FROM car.")
+                return await self.start(update, context)
+                
+            member_id = query.data.split('_')[1]
+            member_name = self.family_members.get(int(member_id), "Unknown")
+            context.user_data['from_member'] = member_id
+            context.user_data['from_name'] = member_name
+            
+            await query.edit_message_text(
+                f"Select member to transfer points TO from {member_name}:",
+                reply_markup=self.get_member_keyboard(include_car=True)
+            )
+            return SELECT_MEMBER
+            
+        else:
+            # For add/subtract, store the target member
+            if query.data == "member_car":
+                member_name = "Car"
+                member_id = "car"
+            else:
+                member_id = query.data.split('_')[1]
+                member_name = self.family_members.get(int(member_id), "Unknown")
+                
+            context.user_data['target_member'] = member_id
+            context.user_data['target_name'] = member_name
+            
+            await query.edit_message_text(
+                f"Enter amount of points to {action} for {member_name}:",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ENTER_AMOUNT
+            
+    async def enter_amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle amount input"""
         try:
             amount = int(update.message.text)
             if amount <= 0:
                 await update.message.reply_text("Please enter a positive number:")
-                return ENTER_AMOUNT_ADD
-            context.user_data["amount"] = amount
-            await update.message.reply_text(
-                f"Enter reason for adding {amount} points to {context.user_data['target_name']}:",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            return ENTER_REASON_ADD
+                return ENTER_AMOUNT
+                
+            context.user_data['amount'] = amount
+            action = context.user_data.get('action')
+            
+            if action == 'transfer':
+                # For transfer, we need to check if source has enough points
+                from_member = context.user_data.get('from_member')
+                if from_member != "car":
+                    current_points = self.points.get(from_member, 0)
+                    if current_points < amount:
+                        await update.message.reply_text(
+                            f"❌ {context.user_data['from_name']} only has {current_points} points.",
+                            reply_markup=self.get_main_menu_keyboard()
+                        )
+                        context.user_data.clear()
+                        return MAIN_MENU
+                        
+                await update.message.reply_text(
+                    f"Enter reason for transferring {amount} points:"
+                )
+            else:
+                await update.message.reply_text(
+                    f"Enter reason for {action}ing {amount} points:"
+                )
+                
+            return ENTER_REASON
+            
         except ValueError:
             await update.message.reply_text("Please enter a valid number:")
-            return ENTER_AMOUNT_ADD
-        except Exception as e:
-            logger.error(f"Error in enter_amount_add: {e}")
-            await update.message.reply_text("❌ An error occurred. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            context.user_data.clear()
-            return MAIN_MENU
-
-    async def enter_reason_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles reason input for adding points."""
-        reason = update.message.text.strip()
-        if not reason or reason.isdigit():
-            await update.message.reply_text("Please provide a descriptive reason:")
-            return ENTER_REASON_ADD
-        context.user_data["reason"] = reason
-        await update.message.reply_text(
-            f"Confirm adding {context.user_data['amount']} points to {context.user_data['target_name']}?\nReason: {reason}",
-            reply_markup=BotUI.get_confirmation_keyboard(),
-        )
-        return CONFIRM_ADD
-
-    async def confirm_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Confirms adding points or cancels the operation."""
-        query = update.callback_query
-        
-        if not query:
-            await update.message.reply_text("❌ Invalid action. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            context.user_data.clear()
-            return MAIN_MENU
-
-        try:
-            await query.answer()
-            logger.info(f"Confirm add callback received: {query.data}")
+            return ENTER_AMOUNT
             
-            if query.data == "confirm":
-                # Get data from context
-                target_id = context.user_data.get("target_id")
-                amount = context.user_data.get("amount")
-                reason = context.user_data.get("reason")
-                target_name = context.user_data.get("target_name")
+    async def enter_reason(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle reason input"""
+        reason = update.message.text.strip()
+        if not reason:
+            await update.message.reply_text("Please enter a reason:")
+            return ENTER_REASON
+            
+        context.user_data['reason'] = reason
+        action = context.user_data.get('action')
+        amount = context.user_data.get('amount')
+        
+        if action == 'transfer':
+            from_name = context.user_data.get('from_name')
+            target_name = context.user_data.get('target_name')
+            await update.message.reply_text(
+                f"Confirm transferring {amount} points from {from_name} to {target_name}?\nReason: {reason}",
+                reply_markup=self.get_confirmation_keyboard()
+            )
+        else:
+            target_name = context.user_data.get('target_name')
+            action_word = "adding" if action == 'add' else "subtracting"
+            await update.message.reply_text(
+                f"Confirm {action_word} {amount} points to {target_name}?\nReason: {reason}",
+                reply_markup=self.get_confirmation_keyboard()
+            )
+            
+        return CONFIRM_ACTION
+        
+    async def confirm_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle action confirmation"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "cancel":
+            await query.edit_message_text("❌ Cancelled.")
+            return await self.start(update, context)
+            
+        action = context.user_data.get('action')
+        amount = context.user_data.get('amount')
+        reason = context.user_data.get('reason')
+        
+        try:
+            if action == 'add':
+                target = context.user_data.get('target_member')
+                if target == "car":
+                    self.car_points += amount
+                    target_name = "Car"
+                else:
+                    self.points[target] = self.points.get(target, 0) + amount
+                    target_name = self.family_members.get(int(target), "Unknown")
+                    
+                self.record_action(update.effective_user.id, "add", amount, target_name, reason)
                 
-                # Validate required data
-                if target_id is None or amount is None or reason is None or target_name is None:
-                    logger.error(f"Missing context data: target_id={target_id}, amount={amount}, reason={reason}, target_name={target_name}")
-                    await update.effective_chat.send_message(
-                        "❌ Session data lost. Please start over with /start",
-                        reply_markup=BotUI.get_main_menu_keyboard(),
+                await query.edit_message_text(
+                    f"✅ Added {amount} points to {target_name}!\nReason: {reason}",
+                    reply_markup=self.get_main_menu_keyboard()
+                )
+                
+            elif action == 'subtract':
+                target = context.user_data.get('target_member')
+                current_points = self.points.get(target, 0)
+                if current_points < amount:
+                    await query.edit_message_text(
+                        f"❌ {context.user_data['target_name']} only has {current_points} points.",
+                        reply_markup=self.get_main_menu_keyboard()
                     )
                     context.user_data.clear()
                     return MAIN_MENU
-                
-                logger.info(f"Adding {amount} points to {target_name} (ID: {target_id}) by user {update.effective_user.id}")
-                
-                # Update points
-                if target_id == -1:  # Car
-                    old_total = self.data_manager.family_goal.points
-                    self.data_manager.family_goal.points += amount
-                    new_total = self.data_manager.family_goal.points
-                    logger.info(f"Car points updated: {old_total} -> {new_total}")
-                else:
-                    old_total = self.data_manager.points.get(str(target_id), 0)
-                    self.data_manager.points[str(target_id)] = old_total + amount
-                    new_total = self.data_manager.points[str(target_id)]
-                    logger.info(f"{target_name} points updated: {old_total} -> {new_total}")
-                
-                # Record activity
-                self.data_manager.record_activity(
-                    update.effective_user.id, 
-                    "add", 
-                    amount, 
-                    target_id=target_id, 
-                    reason=reason
-                )
-                
-                # Force save data
-                self.data_manager.save_data()
-                logger.info("Data saved successfully")
-                
-                # Send confirmation message - use send instead of edit to avoid inline keyboard errors
-                success_msg = (
-                    f"✅ Added {amount} points to {target_name}!\n"
-                    f"Reason: {reason}\n"
-                    f"New total: {new_total} points."
-                )
-                
-                await update.effective_chat.send_message(
-                    success_msg,
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-                logger.info("Confirmation message sent")
-                
-            elif query.data == "cancel_operation":
-                logger.info("Add operation cancelled by user")
-                await update.effective_chat.send_message(
-                    f"🚫 Operation cancelled.\nReturning to main menu.",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-            else:
-                logger.warning(f"Unexpected callback data: {query.data}")
-                await update.effective_chat.send_message(
-                    "❌ Action cancelled.", 
-                    reply_markup=BotUI.get_main_menu_keyboard()
-                )
-                
-        except Exception as e:
-            logger.error(f"Error in confirm_add: {e}", exc_info=True)
-            try:
-                await update.effective_chat.send_message(
-                    f"❌ Error occurred: {str(e)}\nPlease try again with /start",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-            except Exception as fallback_error:
-                logger.error(f"Failed to send error message: {fallback_error}")
                     
-        finally:
-            context.user_data.clear()
-            
-        return MAIN_MENU
-
-    async def select_member_subtract(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles member selection for subtracting points."""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "main_menu":
-            return await self.start_command(update, context)
-            
-        try:
-            target_id = int(query.data.split("_")[-1])
-            target_name = self.data_manager.family_members.get(target_id, "Unknown")
-            context.user_data.update({"target_id": target_id, "target_name": target_name})
-            await query.edit_message_text(f"Enter points to subtract from {target_name}:")
-            return ENTER_AMOUNT_SUBTRACT
-        except (ValueError, IndexError) as e:
-            logger.error(f"Error parsing member selection: {e}")
-            await query.edit_message_text("❌ Invalid selection. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            return MAIN_MENU
-
-    async def enter_amount_subtract(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles point amount input for subtracting."""
-        try:
-            amount = int(update.message.text)
-            if amount <= 0:
-                await update.message.reply_text("Please enter a positive number:")
-                return ENTER_AMOUNT_SUBTRACT
+                self.points[target] = current_points - amount
+                target_name = self.family_members.get(int(target), "Unknown")
                 
-            current_points = self.data_manager.points.get(str(context.user_data["target_id"]), 0)
-            if current_points < amount:
-                await update.message.reply_text(
-                    f"🛑 {context.user_data['target_name']} has only {current_points} points.",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-                context.user_data.clear()
-                return MAIN_MENU
-                
-            context.user_data["amount"] = amount
-            await update.message.reply_text(
-                f"Enter reason for subtracting {amount} points from {context.user_data['target_name']}:",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            return ENTER_REASON_SUBTRACT
-        except ValueError:
-            await update.message.reply_text("Please enter a valid number:")
-            return ENTER_AMOUNT_SUBTRACT
-        except Exception as e:
-            logger.error(f"Error in enter_amount_subtract: {e}")
-            await update.message.reply_text("❌ An error occurred. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            context.user_data.clear()
-            return MAIN_MENU
-
-    async def enter_reason_subtract(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles reason input for subtracting points."""
-        reason = update.message.text.strip()
-        if not reason or reason.isdigit():
-            await update.message.reply_text("Please provide a descriptive reason:")
-            return ENTER_REASON_SUBTRACT
-        context.user_data["reason"] = reason
-        await update.message.reply_text(
-            f"Confirm subtracting {context.user_data['amount']} points from {context.user_data['target_name']}?\nReason: {reason}",
-            reply_markup=BotUI.get_confirmation_keyboard(),
-        )
-        return CONFIRM_SUBTRACT
-
-    async def confirm_subtract(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Confirms subtracting points or cancels the operation."""
-        query = update.callback_query
-        await query.answer()
-        
-        if not query:
-            await update.message.reply_text("❌ Invalid action. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            context.user_data.clear()
-            return MAIN_MENU
-
-        try:
-            if query.data == "confirm":
-                target_id = context.user_data["target_id"]
-                amount = context.user_data["amount"]
-                reason = context.user_data["reason"]
-                
-                self.data_manager.points[str(target_id)] -= amount
-                self.data_manager.record_activity(update.effective_user.id, "subtract", amount, target_id=target_id, reason=reason)
+                self.record_action(update.effective_user.id, "subtract", amount, target_name, reason)
                 
                 await query.edit_message_text(
-                    f"✅ Subtracted {amount} points from {context.user_data['target_name']} (Reason: {reason}).\n"
-                    f"New total: {self.data_manager.points[str(target_id)]} points.",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
+                    f"✅ Subtracted {amount} points from {target_name}!\nReason: {reason}",
+                    reply_markup=self.get_main_menu_keyboard()
                 )
-            elif query.data == "cancel_operation":
-                await query.edit_message_text(
-                    f"🚫 Operation cancelled for subtracting {context.user_data['amount']} points from {context.user_data['target_name']}."
-                    "\nReturning to main menu.",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-            else:
-                await query.edit_message_text("❌ Action cancelled.", reply_markup=BotUI.get_main_menu_keyboard())
-        except Exception as e:
-            logger.error(f"Error in confirm_subtract: {e}")
-            await query.edit_message_text(
-                f"❌ Error occurred. Please try again. (Error: {str(e)})",
-                reply_markup=BotUI.get_main_menu_keyboard(),
-            )
-        finally:
-            context.user_data.clear()
-        return MAIN_MENU
-
-    async def select_from_transfer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles source member selection for transfer."""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "main_menu":
-            return await self.start_command(update, context)
-            
-        try:
-            from_id = int(query.data.split("_")[-1])
-            from_name = self.data_manager.family_members.get(from_id, "Unknown")
-            context.user_data.update({"from_id": from_id, "from_name": from_name})
-            await query.edit_message_text(
-                f"Select who to transfer points TO from {from_name}:",
-                reply_markup=BotUI.get_member_selection_keyboard(self.data_manager.family_members, exclude_id=from_id, include_car=True),
-            )
-            return SELECT_TO_TRANSFER
-        except (ValueError, IndexError) as e:
-            logger.error(f"Error parsing member selection: {e}")
-            await query.edit_message_text("❌ Invalid selection. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            return MAIN_MENU
-
-    async def select_to_transfer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles destination selection for transfer."""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "main_menu":
-            return await self.start_command(update, context)
-            
-        try:
-            to_id = int(query.data.split("_")[-1])
-            to_name = "Car" if to_id == -1 else self.data_manager.family_members.get(to_id, "Unknown")
-            
-            if context.user_data["from_id"] == to_id:
-                await query.edit_message_text(
-                    "You cannot transfer points to yourself. Select another recipient:",
-                    reply_markup=BotUI.get_member_selection_keyboard(self.data_manager.family_members, exclude_id=context.user_data["from_id"], include_car=True),
-                )
-                return SELECT_TO_TRANSFER
                 
-            context.user_data.update({"to_id": to_id, "to_name": to_name})
-            await query.edit_message_text(f"Enter points to transfer from {context.user_data['from_name']} to {to_name}:")
-            return ENTER_AMOUNT_TRANSFER
-        except (ValueError, IndexError) as e:
-            logger.error(f"Error parsing member selection: {e}")
-            await query.edit_message_text("❌ Invalid selection. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            return MAIN_MENU
-
-    async def enter_amount_transfer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles point amount input for transfer."""
-        try:
-            amount = int(update.message.text)
-            if amount <= 0:
-                await update.message.reply_text("Please enter a positive number:")
-                return ENTER_AMOUNT_TRANSFER
+            elif action == 'transfer':
+                from_member = context.user_data.get('from_member')
+                target = context.user_data.get('target_member')
                 
-            current_points = self.data_manager.points.get(str(context.user_data["from_id"]), 0)
-            if current_points < amount:
-                await update.message.reply_text(
-                    f"🛑 {context.user_data['from_name']} has only {current_points} points.",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-                context.user_data.clear()
-                return MAIN_MENU
-                
-            context.user_data["amount"] = amount
-            await update.message.reply_text(
-                f"Enter reason for transferring {amount} points from {context.user_data['from_name']} to {context.user_data['to_name']}:",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            return ENTER_REASON_TRANSFER
-        except ValueError:
-            await update.message.reply_text("Please enter a valid number:")
-            return ENTER_AMOUNT_TRANSFER
-        except Exception as e:
-            logger.error(f"Error in enter_amount_transfer: {e}")
-            await update.message.reply_text("❌ An error occurred. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            context.user_data.clear()
-            return MAIN_MENU
-
-    async def enter_reason_transfer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles reason input for transfer."""
-        reason = update.message.text.strip()
-        if not reason or reason.isdigit():
-            await update.message.reply_text("Please provide a descriptive reason:")
-            return ENTER_REASON_TRANSFER
-        context.user_data["reason"] = reason
-        await update.message.reply_text(
-            f"Confirm transferring {context.user_data['amount']} points from {context.user_data['from_name']} to {context.user_data['to_name']}?\nReason: {reason}",
-            reply_markup=BotUI.get_confirmation_keyboard(),
-        )
-        return CONFIRM_TRANSFER
-
-    async def confirm_transfer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Confirms transferring points or cancels the operation."""
-        query = update.callback_query
-        await query.answer()
-        
-        if not query:
-            await update.message.reply_text("❌ Invalid action. Please try again.", reply_markup=BotUI.get_main_menu_keyboard())
-            context.user_data.clear()
-            return MAIN_MENU
-
-        try:
-            if query.data == "confirm":
-                from_id = context.user_data["from_id"]
-                to_id = context.user_data["to_id"]
-                amount = context.user_data["amount"]
-                reason = context.user_data["reason"]
-                
-                self.data_manager.points[str(from_id)] -= amount
-                if to_id == -1:
-                    self.data_manager.family_goal.points += amount
+                # Subtract from source
+                if from_member == "car":
+                    if self.car_points < amount:
+                        await query.edit_message_text(
+                            f"❌ Car only has {self.car_points} points.",
+                            reply_markup=self.get_main_menu_keyboard()
+                        )
+                        context.user_data.clear()
+                        return MAIN_MENU
+                    self.car_points -= amount
+                    from_name = "Car"
                 else:
-                    self.data_manager.points[str(to_id)] = self.data_manager.points.get(str(to_id), 0) + amount
-                    
-                self.data_manager.record_activity(
-                    update.effective_user.id, "transfer", amount, source_id=from_id, target_id=to_id, reason=reason
-                )
+                    current_points = self.points.get(from_member, 0)
+                    if current_points < amount:
+                        await query.edit_message_text(
+                            f"❌ {context.user_data['from_name']} only has {current_points} points.",
+                            reply_markup=self.get_main_menu_keyboard()
+                        )
+                        context.user_data.clear()
+                        return MAIN_MENU
+                    self.points[from_member] = current_points - amount
+                    from_name = self.family_members.get(int(from_member), "Unknown")
                 
-                from_total = self.data_manager.points[str(from_id)]
-                to_total = self.data_manager.family_goal.points if to_id == -1 else self.data_manager.points[str(to_id)]
+                # Add to target
+                if target == "car":
+                    self.car_points += amount
+                    target_name = "Car"
+                else:
+                    self.points[target] = self.points.get(target, 0) + amount
+                    target_name = self.family_members.get(int(target), "Unknown")
                 
-                msg = (
-                    f"✅ Transferred {amount} points from {context.user_data['from_name']} to {context.user_data['to_name']} (Reason: {reason}).\n"
-                    f"New totals:\n{context.user_data['from_name']}: {from_total} points\n"
-                    f"{context.user_data['to_name']}: {to_total} points"
-                )
-                await query.edit_message_text(msg, reply_markup=BotUI.get_main_menu_keyboard())
-            elif query.data == "cancel_operation":
+                self.record_action(update.effective_user.id, "transfer", amount, f"{from_name} → {target_name}", reason)
+                
                 await query.edit_message_text(
-                    f"🚫 Operation cancelled for transferring {context.user_data['amount']} points from {context.user_data['from_name']} to {context.user_data['to_name']}."
-                    "\nReturning to main menu.",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
+                    f"✅ Transferred {amount} points from {from_name} to {target_name}!\nReason: {reason}",
+                    reply_markup=self.get_main_menu_keyboard()
                 )
-            else:
-                await query.edit_message_text("❌ Action cancelled.", reply_markup=BotUI.get_main_menu_keyboard())
+                
         except Exception as e:
-            logger.error(f"Error in confirm_transfer: {e}")
+            logger.error(f"Error in confirm_action: {e}")
             await query.edit_message_text(
-                f"❌ Error occurred. Please try again. (Error: {str(e)})",
-                reply_markup=BotUI.get_main_menu_keyboard(),
+                f"❌ Error occurred: {str(e)}",
+                reply_markup=self.get_main_menu_keyboard()
             )
-        finally:
-            context.user_data.clear()
-        return MAIN_MENU
-
-    async def add_member_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Starts adding a new family member."""
-        if update.effective_user.id != ADMIN_ID:
-            await update.message.reply_text("❌ Only the administrator can add new members.")
-            return ConversationHandler.END
             
-        await update.message.reply_text("Enter the new member's name:", reply_markup=ReplyKeyboardRemove())
-        context.user_data["temp_performer_id"] = update.effective_user.id
-        return ADD_MEMBER_NAME
-
-    async def enter_new_member_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles new member name input."""
-        name = update.message.text.strip()
-        if not name or any(char.isdigit() for char in name):
-            await update.message.reply_text("Please enter a valid name (text only):")
-            return ADD_MEMBER_NAME
-        context.user_data["new_member_name"] = name
-        await update.message.reply_text(
-            f"Enter {name}'s Telegram User ID (forward a message to @userinfobot to get it):",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return ADD_MEMBER_ID
-
-    async def enter_new_member_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles new member ID input."""
-        try:
-            member_id = int(update.message.text)
-            if member_id <= 0:
-                await update.message.reply_text("Please enter a valid Telegram User ID:")
-                return ADD_MEMBER_ID
-            context.user_data["new_member_id"] = member_id
-            await update.message.reply_text(
-                f"Confirm adding:\nName: *{context.user_data['new_member_name']}*\nID: `{member_id}`",
-                parse_mode="Markdown",
-                reply_markup=BotUI.get_confirmation_keyboard(),
-            )
-            return CONFIRM_ADD_MEMBER
-        except ValueError:
-            await update.message.reply_text("Please enter a valid number for the Telegram ID:")
-            return ADD_MEMBER_ID
-
-    async def confirm_add_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Confirms adding a new member."""
-        query = update.callback_query
-        await query.answer()
+        context.user_data.clear()
+        return MAIN_MENU
         
-        try:
-            if query.data == "confirm":
-                member_id = context.user_data["new_member_id"]
-                name = context.user_data["new_member_name"]
-                success, message = self.data_manager.add_member(member_id, name)
-                
-                msg = f"🎉 {name} (ID: `{member_id}`) added!" if success else f"⚠️ {message}"
-                if success:
-                    self.data_manager.record_activity(
-                        context.user_data.get("temp_performer_id", update.effective_user.id),
-                        "add_member",
-                        0,
-                        target_id=member_id,
-                        reason=f"Added {name}",
-                    )
-                await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=BotUI.get_main_menu_keyboard())
-            elif query.data == "cancel_operation":
-                await query.edit_message_text(
-                    f"🚫 Operation cancelled for adding member {context.user_data['new_member_name']}."
-                    "\nReturning to main menu.",
-                    reply_markup=BotUI.get_main_menu_keyboard(),
-                )
-            else:
-                await query.edit_message_text("❌ Action cancelled.", reply_markup=BotUI.get_main_menu_keyboard())
-        except Exception as e:
-            logger.error(f"Error in confirm_add_member: {e}")
-            await query.edit_message_text(
-                f"❌ Error occurred. Please try again. (Error: {str(e)})",
-                reply_markup=BotUI.get_main_menu_keyboard(),
+    async def show_leaderboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show leaderboard"""
+        # Sort members by points
+        sorted_members = sorted(
+            [(uid, name, self.points.get(str(uid), 0)) for uid, name in self.family_members.items()],
+            key=lambda x: x[2],
+            reverse=True
+        )
+        
+        leaderboard_text = "🏆 **Family Leaderboard** 🏆\n\n"
+        
+        for i, (uid, name, points) in enumerate(sorted_members, 1):
+            emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "•"
+            leaderboard_text += f"{emoji} {name}: {points} points\n"
+            
+        leaderboard_text += f"\n🚗 **Car (Family Goal)**: {self.car_points} points"
+        
+        await update.message.reply_text(
+            leaderboard_text,
+            parse_mode='Markdown',
+            reply_markup=self.get_main_menu_keyboard()
+        )
+        
+    async def show_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show recent history"""
+        if not self.history:
+            await update.message.reply_text(
+                "📜 No activity history yet.",
+                reply_markup=self.get_main_menu_keyboard()
             )
-        finally:
-            context.user_data.clear()
-        return MAIN_MENU
-
-    async def display_leaderboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Displays the leaderboard."""
-        try:
-            if not self.data_manager.points or all(points == 0 for uid, points in self.data_manager.points.items() if int(uid) in self.data_manager.family_members):
-                msg = "🏆 **Leaderboard** 🏆\n\nNo points yet. Start adding some!"
-            else:
-                leaderboard_entries = []
-                for uid, points in sorted(self.data_manager.points.items(), key=lambda x: x[1], reverse=True):
-                    if int(uid) in self.data_manager.family_members and points != 0:
-                        name = self.data_manager.family_members.get(int(uid), f'User {uid}')
-                        leaderboard_entries.append(f"• {name}: {points} points")
+            return
+            
+        # Show last 10 entries
+        recent_history = self.history[-10:]
+        history_text = "📜 **Recent Activity** 📜\n\n"
+        
+        for entry in reversed(recent_history):
+            timestamp = entry['timestamp']
+            performer = entry['performer']
+            action = entry['action']
+            amount = entry['amount']
+            target = entry['target']
+            reason = entry['reason']
+            
+            if action == 'transfer':
+                history_text += f"🔄 {timestamp}\n{performer} transferred {amount} points: {target}\nReason: {reason}\n\n"
+            elif action == 'add':
+                history_text += f"➕ {timestamp}\n{performer} added {amount} points to {target}\nReason: {reason}\n\n"
+            elif action == 'subtract':
+                history_text += f"➖ {timestamp}\n{performer} subtracted {amount} points from {target}\nReason: {reason}\n\n"
                 
-                leaderboard_text = "\n".join(leaderboard_entries) if leaderboard_entries else "No points yet."
-                msg = (
-                    f"🏆 **Leaderboard** 🏆\n\n{leaderboard_text}\n\n"
-                    f"🚗 **Car (Family Goal)**: {self.data_manager.family_goal.points} points"
-                )
-                
-            await self._send_or_edit_message(update, msg, parse_mode="Markdown", reply_markup=BotUI.get_main_menu_keyboard())
-        except Exception as e:
-            logger.error(f"Error in display_leaderboard: {e}")
-            await self._send_or_edit_message(
-                update, 
-                "❌ Error displaying leaderboard. Please try again.",
-                reply_markup=BotUI.get_main_menu_keyboard()
-            )
-        return MAIN_MENU
-
-    async def display_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Displays recent history."""
-        try:
-            if not self.data_manager.history:
-                msg = "📜 **History** 📜\n\nNo activity yet."
-            else:
-                history_entries = []
-                for entry in reversed(self.data_manager.history[-10:]):
-                    formatted_entry = self.data_manager._format_history_entry(entry)
-                    history_entries.append(formatted_entry)
-                
-                history_text = "\n\n".join(history_entries)
-                msg = f"📜 **History** 📜\n\n{history_text}"
-                
-            await self._send_or_edit_message(update, msg, parse_mode="Markdown", reply_markup=BotUI.get_main_menu_keyboard())
-        except Exception as e:
-            logger.error(f"Error in display_history: {e}")
-            await self._send_or_edit_message(
-                update,
-                "❌ Error displaying history. Please try again.",
-                reply_markup=BotUI.get_main_menu_keyboard()
-            )
-        return MAIN_MENU
-
-    async def cancel_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Cancels the current action."""
-        await self._send_or_edit_message(
-            update, "❌ Action cancelled.", reply_markup=BotUI.get_main_menu_keyboard()
+        await update.message.reply_text(
+            history_text,
+            parse_mode='Markdown',
+            reply_markup=self.get_main_menu_keyboard()
+        )
+        
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Cancel current action"""
+        await update.message.reply_text(
+            "❌ Cancelled. Use /start to begin again.",
+            reply_markup=self.get_main_menu_keyboard()
         )
         context.user_data.clear()
         return MAIN_MENU
-
-    async def unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handles unknown commands."""
-        if not await self._check_authorization(update):
-            return
-            
-        await update.message.reply_text(
-            "❓ Unknown command. Use /start to begin.", reply_markup=BotUI.get_main_menu_keyboard()
-        )
-
-    async def handle_text_not_in_conversation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handles unexpected text input."""
-        if not await self._check_authorization(update):
-            return
-            
-        await update.message.reply_text(
-            "Please use the menu options or /start.", reply_markup=BotUI.get_main_menu_keyboard()
-        )
-
-    async def weekly_summary_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Sends weekly summary every Sunday."""
-        try:
-            if datetime.now().weekday() == WEEKLY_SUMMARY_DAY:
-                summary = self.data_manager.get_weekly_summary()
-                chat_id = GROUP_CHAT_ID or ADMIN_ID
-                await context.bot.send_message(chat_id=chat_id, text=summary, parse_mode="Markdown")
-                logger.info(f"Weekly summary sent to chat {chat_id}")
-        except Exception as e:
-            logger.error(f"Failed to send weekly summary: {e}")
-
-    async def history_purge_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Purges old history periodically."""
-        try:
-            logger.info("Running history purge job...")
-            self.data_manager.purge_old_history()
-        except Exception as e:
-            logger.error(f"Error in history purge job: {e}")
-
-    async def _send_or_edit_message(
-        self,
-        update: Update,
-        text: str,
-        reply_markup=None,
-        parse_mode: Optional[str] = None,
-    ) -> None:
-        """Sends or edits a message with retry logic."""
-        for attempt in range(RETRY_ATTEMPTS):
-            try:
-                if update.callback_query and update.callback_query.message:
-                    # Try to edit the existing message
-                    await update.callback_query.edit_message_text(
-                        text, 
-                        reply_markup=reply_markup, 
-                        parse_mode=parse_mode
-                    )
-                    return
-                else:
-                    # Send a new message
-                    await update.effective_chat.send_message(
-                        text, 
-                        reply_markup=reply_markup, 
-                        parse_mode=parse_mode
-                    )
-                    return
-            except BadRequest as e:
-                error_msg = str(e).lower()
-                if "message is not modified" in error_msg:
-                    logger.debug("Message content unchanged, skipping edit")
-                    return
-                elif "message can't be edited" in error_msg or "inline keyboard expected" in error_msg:
-                    logger.warning(f"Can't edit message, sending new one: {e}")
-                    # Fall back to sending a new message
-                    try:
-                        await update.effective_chat.send_message(
-                            text, 
-                            reply_markup=reply_markup, 
-                            parse_mode=parse_mode
-                        )
-                        return
-                    except Exception as fallback_error:
-                        logger.error(f"Fallback message failed: {fallback_error}")
-                        if attempt == RETRY_ATTEMPTS - 1:
-                            raise
-                else:
-                    logger.warning(f"BadRequest error (attempt {attempt + 1}): {e}")
-                    await asyncio.sleep(NETWORK_RETRY_DELAY)
-            except NetworkError as e:
-                logger.warning(f"Network error (attempt {attempt + 1}): {e}")
-                await asyncio.sleep(EXTENDED_RETRY_DELAY)
-            except Exception as e:
-                logger.error(f"Unexpected error in _send_or_edit_message (attempt {attempt + 1}): {e}")
-                await asyncio.sleep(NETWORK_RETRY_DELAY)
-                
-        # Final fallback - send new message without retry
-        logger.error("Failed to send/edit message after retries. Final fallback attempt.")
-        try:
-            await update.effective_chat.send_message(
-                text, 
-                reply_markup=reply_markup, 
-                parse_mode=parse_mode
-            )
-        except Exception as e:
-            logger.error(f"Final fallback message failed: {e}")
-            # Send a simple message without markup as last resort
-            try:
-                await update.effective_chat.send_message("❌ An error occurred. Please use /start to restart.")
-            except Exception as final_error:
-                logger.error(f"Even basic message failed: {final_error}")
-
-    def setup_handlers(self) -> None:
-        """Sets up all bot handlers."""
+        
+    def setup_handlers(self, application: Application):
+        """Setup bot handlers"""
         conv_handler = ConversationHandler(
-            entry_points=[
-                CommandHandler("start", self.start_command),
-                CommandHandler("points", self.start_command),
-                CommandHandler("add_member", self.add_member_command, filters=filters.User(ADMIN_ID)),
-            ],
+            entry_points=[CommandHandler("start", self.start)],
             states={
                 MAIN_MENU: [
-                    MessageHandler(filters.Regex("^(➕ Add Points|➖ Subtract Points|↔️ Transfer Points|📊 Leaderboard|📜 History)$"), self.handle_main_menu),
-                    CommandHandler("leaderboard", self.display_leaderboard),
-                    CommandHandler("history", self.display_history),
+                    MessageHandler(filters.Regex("^(➕ Add Points|➖ Subtract Points|↔️ Transfer Points|📊 Leaderboard|📜 History)$"), self.handle_main_menu)
                 ],
-                SELECT_MEMBER_ADD: [CallbackQueryHandler(self.select_member_add, pattern="^select_member_[0-9-]+$")],
-                ENTER_AMOUNT_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_amount_add)],
-                ENTER_REASON_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_reason_add)],
-                CONFIRM_ADD: [CallbackQueryHandler(self.confirm_add, pattern="^(confirm|cancel_operation)$")],
-                SELECT_MEMBER_SUBTRACT: [CallbackQueryHandler(self.select_member_subtract, pattern="^select_member_[0-9-]+$")],
-                ENTER_AMOUNT_SUBTRACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_amount_subtract)],
-                ENTER_REASON_SUBTRACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_reason_subtract)],
-                CONFIRM_SUBTRACT: [CallbackQueryHandler(self.confirm_subtract, pattern="^(confirm|cancel_operation)$")],
-                SELECT_FROM_TRANSFER: [CallbackQueryHandler(self.select_from_transfer, pattern="^select_member_[0-9-]+$")],
-                SELECT_TO_TRANSFER: [CallbackQueryHandler(self.select_to_transfer, pattern="^select_member_[0-9-]+$")],
-                ENTER_AMOUNT_TRANSFER: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_amount_transfer)],
-                ENTER_REASON_TRANSFER: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_reason_transfer)],
-                CONFIRM_TRANSFER: [CallbackQueryHandler(self.confirm_transfer, pattern="^(confirm|cancel_operation)$")],
-                ADD_MEMBER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_new_member_name)],
-                ADD_MEMBER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_new_member_id)],
-                CONFIRM_ADD_MEMBER: [CallbackQueryHandler(self.confirm_add_member, pattern="^(confirm|cancel_operation)$")],
+                SELECT_MEMBER: [
+                    CallbackQueryHandler(self.select_member, pattern="^member_")
+                ],
+                ENTER_AMOUNT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_amount)
+                ],
+                ENTER_REASON: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_reason)
+                ],
+                CONFIRM_ACTION: [
+                    CallbackQueryHandler(self.confirm_action, pattern="^(confirm|cancel)$")
+                ]
             },
-            fallbacks=[
-                CommandHandler("cancel", self.cancel_action),
-                CallbackQueryHandler(self.cancel_action, pattern="^cancel_action$"),
-                CallbackQueryHandler(self.start_command, pattern="^main_menu$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_not_in_conversation),
-            ],
-            per_user=True,
+            fallbacks=[CommandHandler("cancel", self.cancel)]
         )
         
-        self.application.add_handler(conv_handler)
-        self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
+        application.add_handler(conv_handler)
         
-        # Schedule periodic jobs
-        self.application.job_queue.run_repeating(
-            self.history_purge_job, 
-            interval=timedelta(hours=24), 
-            first=datetime.now() + timedelta(minutes=5)
-        )
-        self.application.job_queue.run_repeating(
-            self.weekly_summary_job, 
-            interval=timedelta(hours=24), 
-            first=datetime.now() + timedelta(minutes=5)
-        )
-
-    def run(self) -> None:
-        """Starts the bot."""
+    def run(self):
+        """Run the bot"""
+        application = Application.builder().token(TOKEN).build()
+        self.setup_handlers(application)
+        
         logger.info("Starting Family Points Bot...")
-        try:
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
-        except Exception as e:
-            logger.error(f"Error running bot: {e}")
-            raise
+        application.run_polling()
 
-def main() -> None:
-    """Main function to start the bot."""
-    try:
-        logger.info("Initializing Family Points Bot...")
-        data_manager = DataManager(DATA_FILE, BACKUP_DIR)
-        bot = FamilyPointsBot(TOKEN, data_manager)
-        bot.run()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        raise
+def main():
+    """Main function"""
+    bot = FamilyPointsBot()
+    bot.run()
 
 if __name__ == "__main__":
     main()
