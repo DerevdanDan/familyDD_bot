@@ -62,6 +62,12 @@ class FamilyPointsBot:
                 self.history = []
                 self.car_points = 0
                 self.save_data()
+                
+            # Ensure all family members have point entries
+            for uid in self.family_members:
+                if str(uid) not in self.points:
+                    self.points[str(uid)] = 0
+                    
         except Exception as e:
             logger.error(f"Error loading data: {e}")
             self.points = {str(uid): 0 for uid in self.family_members}
@@ -152,7 +158,7 @@ class FamilyPointsBot:
             context.user_data['action'] = 'add'
             await update.message.reply_text(
                 "Select member to add points to:",
-                reply_markup=self.get_member_keyboard(include_car=True)
+                reply_markup=self.get_member_keyboard(include_car=False)  # No car for add
             )
             return SELECT_MEMBER
             
@@ -160,7 +166,7 @@ class FamilyPointsBot:
             context.user_data['action'] = 'subtract'
             await update.message.reply_text(
                 "Select member to subtract points from:",
-                reply_markup=self.get_member_keyboard()
+                reply_markup=self.get_member_keyboard(include_car=False)  # No car for subtract
             )
             return SELECT_MEMBER
             
@@ -168,7 +174,7 @@ class FamilyPointsBot:
             context.user_data['action'] = 'transfer'
             await update.message.reply_text(
                 "Select member to transfer points FROM:",
-                reply_markup=self.get_member_keyboard()
+                reply_markup=self.get_member_keyboard(include_car=False)  # No car as source
             )
             return SELECT_MEMBER
             
@@ -199,30 +205,54 @@ class FamilyPointsBot:
         action = context.user_data.get('action')
         
         if action == 'transfer':
-            # For transfer, store the source member
-            if query.data == "member_car":
-                await query.edit_message_text("❌ Cannot transfer FROM car.")
-                return await self.start(update, context)
+            # Check if this is the first selection (source) or second selection (destination)
+            if 'from_member' not in context.user_data:
+                # First selection - source member
+                if query.data == "member_car":
+                    await query.edit_message_text("❌ Cannot transfer FROM car.")
+                    return await self.start(update, context)
+                    
+                member_id = query.data.split('_')[1]
+                member_name = self.family_members.get(int(member_id), "Unknown")
+                context.user_data['from_member'] = member_id
+                context.user_data['from_name'] = member_name
                 
-            member_id = query.data.split('_')[1]
-            member_name = self.family_members.get(int(member_id), "Unknown")
-            context.user_data['from_member'] = member_id
-            context.user_data['from_name'] = member_name
-            
-            await query.edit_message_text(
-                f"Select member to transfer points TO from {member_name}:",
-                reply_markup=self.get_member_keyboard(include_car=True)
-            )
-            return SELECT_MEMBER
+                await query.edit_message_text(
+                    f"Select member to transfer points TO from {member_name}:",
+                    reply_markup=self.get_member_keyboard(include_car=True)  # Include car as destination
+                )
+                return SELECT_MEMBER
+            else:
+                # Second selection - destination member
+                if query.data == "member_car":
+                    target_name = "Car"
+                    target_id = "car"
+                else:
+                    member_id = query.data.split('_')[1]
+                    target_name = self.family_members.get(int(member_id), "Unknown")
+                    target_id = member_id
+                
+                # Check if trying to transfer to self
+                if context.user_data['from_member'] == target_id:
+                    await query.edit_message_text(
+                        "❌ Cannot transfer to yourself. Select another member:",
+                        reply_markup=self.get_member_keyboard(include_car=True)
+                    )
+                    return SELECT_MEMBER
+                
+                context.user_data['target_member'] = target_id
+                context.user_data['target_name'] = target_name
+                
+                await query.edit_message_text(
+                    f"Enter amount of points to transfer from {context.user_data['from_name']} to {target_name}:",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                return ENTER_AMOUNT
             
         else:
             # For add/subtract, store the target member
-            if query.data == "member_car":
-                member_name = "Car"
-                member_id = "car"
-            else:
-                member_id = query.data.split('_')[1]
-                member_name = self.family_members.get(int(member_id), "Unknown")
+            member_id = query.data.split('_')[1]
+            member_name = self.family_members.get(int(member_id), "Unknown")
                 
             context.user_data['target_member'] = member_id
             context.user_data['target_name'] = member_name
@@ -247,18 +277,17 @@ class FamilyPointsBot:
             if action == 'transfer':
                 # For transfer, we need to check if source has enough points
                 from_member = context.user_data.get('from_member')
-                if from_member != "car":
-                    current_points = self.points.get(from_member, 0)
-                    if current_points < amount:
-                        await update.message.reply_text(
-                            f"❌ {context.user_data['from_name']} only has {current_points} points.",
-                            reply_markup=self.get_main_menu_keyboard()
-                        )
-                        context.user_data.clear()
-                        return MAIN_MENU
+                current_points = self.points.get(from_member, 0)
+                if current_points < amount:
+                    await update.message.reply_text(
+                        f"❌ {context.user_data['from_name']} only has {current_points} points.",
+                        reply_markup=self.get_main_menu_keyboard()
+                    )
+                    context.user_data.clear()
+                    return MAIN_MENU
                         
                 await update.message.reply_text(
-                    f"Enter reason for transferring {amount} points:"
+                    f"Enter reason for transferring {amount} points from {context.user_data['from_name']} to {context.user_data['target_name']}:"
                 )
             else:
                 await update.message.reply_text(
@@ -315,12 +344,8 @@ class FamilyPointsBot:
         try:
             if action == 'add':
                 target = context.user_data.get('target_member')
-                if target == "car":
-                    self.car_points += amount
-                    target_name = "Car"
-                else:
-                    self.points[target] = self.points.get(target, 0) + amount
-                    target_name = self.family_members.get(int(target), "Unknown")
+                self.points[target] = self.points.get(target, 0) + amount
+                target_name = self.family_members.get(int(target), "Unknown")
                     
                 self.record_action(update.effective_user.id, "add", amount, target_name, reason)
                 
@@ -354,28 +379,27 @@ class FamilyPointsBot:
                 from_member = context.user_data.get('from_member')
                 target = context.user_data.get('target_member')
                 
+                # Validate transfer is not to self
+                if from_member == target:
+                    await query.edit_message_text(
+                        "❌ Cannot transfer to yourself.",
+                        reply_markup=self.get_main_menu_keyboard()
+                    )
+                    context.user_data.clear()
+                    return MAIN_MENU
+                
                 # Subtract from source
-                if from_member == "car":
-                    if self.car_points < amount:
-                        await query.edit_message_text(
-                            f"❌ Car only has {self.car_points} points.",
-                            reply_markup=self.get_main_menu_keyboard()
-                        )
-                        context.user_data.clear()
-                        return MAIN_MENU
-                    self.car_points -= amount
-                    from_name = "Car"
-                else:
-                    current_points = self.points.get(from_member, 0)
-                    if current_points < amount:
-                        await query.edit_message_text(
-                            f"❌ {context.user_data['from_name']} only has {current_points} points.",
-                            reply_markup=self.get_main_menu_keyboard()
-                        )
-                        context.user_data.clear()
-                        return MAIN_MENU
-                    self.points[from_member] = current_points - amount
-                    from_name = self.family_members.get(int(from_member), "Unknown")
+                current_points = self.points.get(from_member, 0)
+                if current_points < amount:
+                    await query.edit_message_text(
+                        f"❌ {context.user_data['from_name']} only has {current_points} points.",
+                        reply_markup=self.get_main_menu_keyboard()
+                    )
+                    context.user_data.clear()
+                    return MAIN_MENU
+                    
+                self.points[from_member] = current_points - amount
+                from_name = self.family_members.get(int(from_member), "Unknown")
                 
                 # Add to target
                 if target == "car":
