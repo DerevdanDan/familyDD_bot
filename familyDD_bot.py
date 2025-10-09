@@ -15,7 +15,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler,
 )
-from telegram.constants import ParseMode # Ensure this is imported for Markdown
+from telegram.constants import ParseMode 
 
 # --- Configuration for Webhooks on Railway ---
 # Assuming these environment variables are already set up on Railway
@@ -25,6 +25,7 @@ HOST = '0.0.0.0'
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
+    # Use a basic logger for error before full setup
     logging.error("TELEGRAM_BOT_TOKEN environment variable not set. Exiting.")
     sys.exit(1)
 
@@ -39,26 +40,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------
-# ➡️ MINIMAL CHANGES APPLIED HERE:
-# 1. Removed is_family_member function.
-# 2. Removed authorization check from start().
-# 3. Removed authorization check from handle_main_menu().
-# ----------------------------------------------
 
 class FamilyPointsBot:
+    """
+    A Telegram Bot to track and manage family points.
+    """
     def __init__(self):
-        self.data_file = "points_data.json"
-        # The UIDs remain only to map IDs to names for points tracking and display.
+        # We will keep the data file name simple regardless of the script name
+        self.data_file = "points_data.json" 
+        # The UIDs are stored as Integers here, but self.points keys will be Strings.
         self.family_members = {
             15260416: "Papa",
             441113371: "Mama", 
             1059153162: "Danya",
-            5678069063: "Vlad",
+            5678069063: "Vlad", # Vlad's UID is here
             5863747570: "Tima",
         }
-        self.points = {}
-        self.history = []
-        self.car_points = 0
+        self.points: Dict[str, int] = {}
+        self.history: List[Dict] = []
+        self.car_points: int = 0
         self.load_data()
         
     def load_data(self):
@@ -67,21 +67,26 @@ class FamilyPointsBot:
             if os.path.exists(self.data_file):
                 with open(self.data_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    self.points = data.get('points', {})
+                    # Keys in points must be strings for JSON compatibility
+                    self.points = data.get('points', {}) 
                     self.history = data.get('history', [])
                     self.car_points = data.get('car_points', 0)
             else:
-                self.points = {str(uid): 0 for uid in self.family_members}
+                self.points = {} # Initialize empty
                 self.history = []
                 self.car_points = 0
-                self.save_data()
                 
+            # Ensure all family members have an entry, default to 0 if missing
             for uid in self.family_members:
-                if str(uid) not in self.points:
-                    self.points[str(uid)] = 0
+                str_uid = str(uid)
+                if str_uid not in self.points:
+                    self.points[str_uid] = 0
                     
+            self.save_data() # Save structure if it was initialized or updated
+                
         except Exception as e:
             logger.error(f"Error loading data: {e}")
+            # Fallback initialization
             self.points = {str(uid): 0 for uid in self.family_members}
             self.history = []
             self.car_points = 0
@@ -99,12 +104,10 @@ class FamilyPointsBot:
         except Exception as e:
             logger.error(f"Error saving data: {e}")
             
-    # ❌ REMOVED: The is_family_member function is no longer needed for access control.
-        
     def record_action(self, user_id: int, action: str, amount: int, target: str, reason: str):
         """Record an action in history"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Use the name of the user who performed the action, or their ID if not in family_members
+        # Get the performer's name from family_members using their int UID
         performer = self.family_members.get(user_id, f"User {user_id}")
         
         entry = {
@@ -118,7 +121,7 @@ class FamilyPointsBot:
         self.history.append(entry)
         self.save_data()
         
-    def get_main_menu_keyboard(self):
+    def get_main_menu_keyboard(self) -> ReplyKeyboardMarkup:
         """Get main menu keyboard"""
         keyboard = [
             ["➕ Add Points", "➖ Subtract Points"],
@@ -127,17 +130,18 @@ class FamilyPointsBot:
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
-    def get_member_keyboard(self, include_car=False):
+    def get_member_keyboard(self, include_car: bool = False) -> InlineKeyboardMarkup:
         """Get member selection keyboard"""
         keyboard = []
         for uid, name in self.family_members.items():
-            keyboard.append([InlineKeyboardButton(name, callback_data=f"member_{uid}")])
+            # Use string ID for callback_data
+            keyboard.append([InlineKeyboardButton(name, callback_data=f"member_{uid}")]) 
         if include_car:
             keyboard.append([InlineKeyboardButton("🚗 Car", callback_data="member_car")])
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         return InlineKeyboardMarkup(keyboard)
         
-    def get_confirmation_keyboard(self):
+    def get_confirmation_keyboard(self) -> InlineKeyboardMarkup:
         """Get confirmation keyboard"""
         keyboard = [
             [InlineKeyboardButton("✅ Confirm", callback_data="confirm")],
@@ -148,19 +152,16 @@ class FamilyPointsBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle /start command - Now open to all users."""
         
-        # ❌ REMOVED: Authorization check previously here.
-        
         await update.message.reply_text(
             "👋 Welcome to Family Points Bot!\nChoose an action:",
             reply_markup=self.get_main_menu_keyboard()
         )
-        context.user_data.clear()
+        # Clear user data for a fresh start
+        context.user_data.clear() 
         return MAIN_MENU
         
     async def handle_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle main menu selections - Open to all users."""
-        
-        # ❌ REMOVED: Authorization check previously here.
         
         text = update.message.text
         
@@ -204,7 +205,7 @@ class FamilyPointsBot:
             return MAIN_MENU
             
     async def select_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handle member selection"""
+        """Handle member selection via inline keyboard."""
         query = update.callback_query
         if query is None:
             return ConversationHandler.END
@@ -212,17 +213,20 @@ class FamilyPointsBot:
         await query.answer()
         
         if query.data == "cancel":
+            await query.edit_message_text("❌ Cancelled.")
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="❌ Cancelled.",
+                text="Choose another action:",
                 reply_markup=self.get_main_menu_keyboard()
             )
+            context.user_data.clear()
             return MAIN_MENU
             
         action = context.user_data.get('action')
         
         if action == 'transfer':
             if 'from_member' not in context.user_data:
+                # Select 'from' member
                 if query.data == "member_car":
                     await query.edit_message_text("❌ Cannot transfer FROM car.")
                     await context.bot.send_message(
@@ -230,11 +234,13 @@ class FamilyPointsBot:
                         text="Choose another action:",
                         reply_markup=self.get_main_menu_keyboard()
                     )
+                    context.user_data.clear()
                     return MAIN_MENU
                     
-                member_id = query.data.split('_')[1]
-                member_name = self.family_members.get(int(member_id), "Unknown")
-                context.user_data['from_member'] = member_id
+                member_id_str = query.data.split('_')[1] # This is a string UID
+                # Use int() for lookup in family_members
+                member_name = self.family_members.get(int(member_id_str), "Unknown") 
+                context.user_data['from_member'] = member_id_str # Store as string
                 context.user_data['from_name'] = member_name
                 
                 await query.edit_message_text(
@@ -243,22 +249,24 @@ class FamilyPointsBot:
                 )
                 return SELECT_MEMBER
             else:
-                if query.data == "member_car":
-                    target_name = "Car"
-                    target_id = "car"
-                else:
-                    member_id = query.data.split('_')[1]
-                    target_name = self.family_members.get(int(member_id), "Unknown")
-                    target_id = member_id
+                # Select 'to' member/car
+                target_id = query.data.split('_')[1] # This is a string UID or 'car'
                 
-                if context.user_data['from_member'] == target_id:
+                if target_id == "car":
+                    target_name = "Car"
+                    target_id_str = "car"
+                else:
+                    target_name = self.family_members.get(int(target_id), "Unknown")
+                    target_id_str = target_id
+                
+                if context.user_data['from_member'] == target_id_str:
                     await query.edit_message_text(
                         "❌ Cannot transfer to yourself. Select another member:",
                         reply_markup=self.get_member_keyboard(include_car=True)
                     )
                     return SELECT_MEMBER
                 
-                context.user_data['target_member'] = target_id
+                context.user_data['target_member'] = target_id_str # Store as string
                 context.user_data['target_name'] = target_name
                 
                 await query.edit_message_text(
@@ -267,10 +275,11 @@ class FamilyPointsBot:
                 return ENTER_AMOUNT
             
         else:
-            member_id = query.data.split('_')[1]
-            member_name = self.family_members.get(int(member_id), "Unknown")
+            # Select target for add/subtract
+            member_id_str = query.data.split('_')[1] # This is a string UID
+            member_name = self.family_members.get(int(member_id_str), "Unknown")
                 
-            context.user_data['target_member'] = member_id
+            context.user_data['target_member'] = member_id_str # Store as string
             context.user_data['target_name'] = member_name
             
             await query.edit_message_text(
@@ -290,8 +299,9 @@ class FamilyPointsBot:
             action = context.user_data.get('action')
             
             if action == 'transfer':
-                from_member = context.user_data.get('from_member')
-                current_points = self.points.get(str(from_member), 0)
+                from_member_str = context.user_data.get('from_member')
+                # Access self.points with the string key
+                current_points = self.points.get(from_member_str, 0) 
                 
                 if current_points < amount:
                     await update.message.reply_text(
@@ -355,6 +365,7 @@ class FamilyPointsBot:
                 text="Choose another action:",
                 reply_markup=self.get_main_menu_keyboard()
             )
+            context.user_data.clear()
             return MAIN_MENU
             
         action = context.user_data.get('action')
@@ -362,51 +373,56 @@ class FamilyPointsBot:
         reason = context.user_data.get('reason')
         
         try:
-            target = context.user_data.get('target_member')
+            target_member_str = context.user_data.get('target_member') # String UID or 'car'
             target_name = context.user_data.get('target_name')
             user_id = update.effective_user.id
             
             if action == 'add':
-                self.points[target] = self.points.get(target, 0) + amount
+                # Access self.points with the string key
+                self.points[target_member_str] = self.points.get(target_member_str, 0) + amount 
                 self.record_action(user_id, "add", amount, target_name, reason)
                 await query.edit_message_text(
                     f"✅ Added {amount} points to {target_name}!\nReason: {reason}"
                 )
                 
             elif action == 'subtract':
-                current_points = self.points.get(target, 0)
+                current_points = self.points.get(target_member_str, 0)
                 if current_points < amount:
                     await query.edit_message_text(f"❌ {target_name} only has {current_points} points.")
                     context.user_data.clear()
                     return MAIN_MENU
                     
-                self.points[target] = current_points - amount
+                self.points[target_member_str] = current_points - amount
                 self.record_action(user_id, "subtract", amount, target_name, reason)
                 await query.edit_message_text(
                     f"✅ Subtracted {amount} points from {target_name}!\nReason: {reason}"
                 )
                 
             elif action == 'transfer':
-                from_member = context.user_data.get('from_member')
+                from_member_str = context.user_data.get('from_member')
                 from_name = context.user_data.get('from_name')
                 
-                if from_member == target:
+                # Check if transfer to self (already checked, but good for safety)
+                if from_member_str == target_member_str: 
                     await query.edit_message_text("❌ Cannot transfer to yourself.")
                     context.user_data.clear()
                     return MAIN_MENU
                 
-                current_points = self.points.get(from_member, 0)
+                current_points = self.points.get(from_member_str, 0)
                 if current_points < amount:
                     await query.edit_message_text(f"❌ {from_name} only has {current_points} points.")
                     context.user_data.clear()
                     return MAIN_MENU
                     
-                self.points[from_member] = current_points - amount
+                # Deduct from source
+                self.points[from_member_str] = current_points - amount
                 
-                if target == "car":
+                # Add to target
+                if target_member_str == "car":
                     self.car_points += amount
                 else:
-                    self.points[target] = self.points.get(target, 0) + amount
+                    # Access self.points with the string key
+                    self.points[target_member_str] = self.points.get(target_member_str, 0) + amount 
                 
                 self.record_action(user_id, "transfer", amount, f"{from_name} → {target_name}", reason)
                 await query.edit_message_text(
@@ -417,6 +433,7 @@ class FamilyPointsBot:
             logger.error(f"Error in confirm_action: {e}")
             await query.edit_message_text(f"❌ Error occurred: {str(e)}")
         
+        # Send a follow-up message with the main menu keyboard
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="Choose another action:",
@@ -427,8 +444,15 @@ class FamilyPointsBot:
         
     async def show_leaderboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show leaderboard"""
+        # Create a list of (uid, name, points)
+        member_data = []
+        for uid, name in self.family_members.items():
+            # Get points using the string UID key
+            points = self.points.get(str(uid), 0) 
+            member_data.append((uid, name, points))
+            
         sorted_members = sorted(
-            [(uid, name, self.points.get(str(uid), 0)) for uid, name in self.family_members.items()],
+            member_data,
             key=lambda x: x[2],
             reverse=True
         )
@@ -459,7 +483,8 @@ class FamilyPointsBot:
         recent_history = self.history[-10:]
         history_text = "📜 **Recent Activity** 📜\n\n"
         
-        for entry in reversed(recent_history):
+        # Display history in reverse chronological order
+        for entry in reversed(recent_history): 
             timestamp = entry['timestamp']
             performer = entry['performer']
             action = entry['action']
@@ -468,11 +493,11 @@ class FamilyPointsBot:
             reason = entry['reason']
             
             if action == 'transfer':
-                history_text += f"🔄 {timestamp}\n{performer} transferred {amount} points: {target}\nReason: {reason}\n\n"
+                history_text += f"🔄 {timestamp}\n{performer} transferred {amount} points: {target}\n_Reason: {reason}_\n\n"
             elif action == 'add':
-                history_text += f"➕ {timestamp}\n{performer} added {amount} points to {target}\nReason: {reason}\n\n"
+                history_text += f"➕ {timestamp}\n{performer} added {amount} points to {target}\n_Reason: {reason}_\n\n"
             elif action == 'subtract':
-                history_text += f"➖ {timestamp}\n{performer} subtracted {amount} points from {target}\nReason: {reason}\n\n"
+                history_text += f"➖ {timestamp}\n{performer} subtracted {amount} points from {target}\n_Reason: {reason}_\n\n"
                 
         await update.message.reply_text(
             history_text,
@@ -482,8 +507,14 @@ class FamilyPointsBot:
         
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Cancel current action"""
-        await update.message.reply_text(
-            "❌ Cancelled. Choose another action.",
+        if update.callback_query:
+            await update.callback_query.edit_message_text("❌ Cancelled.")
+        else:
+            await update.message.reply_text("❌ Cancelled.")
+            
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Choose another action:",
             reply_markup=self.get_main_menu_keyboard()
         )
         context.user_data.clear()
@@ -491,27 +522,40 @@ class FamilyPointsBot:
         
     def setup_handlers(self, application: Application):
         """Setup bot handlers"""
+        # The fallbacks on the ConversationHandler are important for /cancel
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", self.start)],
             states={
                 MAIN_MENU: [
-                    MessageHandler(filters.Regex("^(➕ Add Points|➖ Subtract Points|↔️ Transfer Points|📊 Leaderboard|📜 History)$"), self.handle_main_menu),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_main_menu)
+                    # Handler for all main menu buttons (ReplyKeyboard)
+                    MessageHandler(
+                        filters.Regex("^(➕ Add Points|➖ Subtract Points|↔️ Transfer Points|📊 Leaderboard|📜 History)$"), 
+                        self.handle_main_menu
+                    ),
+                    CommandHandler("cancel", self.cancel) # Allow /cancel in main menu
                 ],
                 SELECT_MEMBER: [
+                    # Handler for member selection inline buttons
                     CallbackQueryHandler(self.select_member, pattern="^member_|^cancel$")
                 ],
                 ENTER_AMOUNT: [
+                    # Handler for text input (amount)
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_amount)
                 ],
                 ENTER_REASON: [
+                    # Handler for text input (reason)
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_reason)
                 ],
                 CONFIRM_ACTION: [
+                    # Handler for confirm/cancel inline buttons
                     CallbackQueryHandler(self.confirm_action, pattern="^(confirm|cancel)$")
                 ]
             },
-            fallbacks=[CommandHandler("cancel", self.cancel)]
+            fallbacks=[
+                CommandHandler("cancel", self.cancel), # Fallback for all states
+                # Allows users to type text that doesn't match other handlers
+                MessageHandler(filters.TEXT & ~filters.COMMAND, self.cancel) 
+            ]
         )
         
         application.add_handler(conv_handler)
@@ -526,10 +570,11 @@ class FamilyPointsBot:
         self.setup_handlers(application)
         
         # This Webhook configuration is maintained for your existing Railway deployment
+        # Note: url_path must match the one used in the webhook URL
         application.run_webhook(
             listen=HOST,
             port=PORT,
-            url_path=TOKEN,
+            url_path=f"/{TOKEN}", # Adjusted url_path to include the token for security
             webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
         )
         
@@ -537,8 +582,14 @@ class FamilyPointsBot:
 
 def main():
     """Main function"""
+    # Create an initial points_data.json file if it doesn't exist
+    if not os.path.exists("points_data.json"):
+        logging.info("Initializing points_data.json...")
+    
     bot = FamilyPointsBot()
     bot.run()
 
 if __name__ == "__main__":
+    # The user-specified script name is familyDD_bot.py
+    # We maintain this file name for deployment clarity
     main()
