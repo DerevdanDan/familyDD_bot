@@ -1,1 +1,0 @@
-web: python family_bot.py
