@@ -9,7 +9,12 @@ import os
 
 # 1. Setup and Data Structure
 # The bot token you provided
-BOT_TOKEN = "7142262881:AAGXHFcMY_bSWKhEXJRBtU05rU-lo86YpxQ" 
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") 
+if not BOT_TOKEN:
+    # If the environment variable isn't set, this is a fallback for local testing
+    # or you can make this an error to enforce security.
+    print("Warning: TELEGRAM_BOT_TOKEN environment variable not found. Using hardcoded token.")
+    BOT_TOKEN = "7142262881:AAGXHFcMY_bSWKhEXJRBtU05rU-lo86Ypxg"
 DATA_FILE = "data.json"
 PARTICIPANTS = ["Mama", "Papa", "Danya", "Vlad", "Tima", "Car"] 
 CAR_ACCOUNT_NAME = "Car"
